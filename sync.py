@@ -2,57 +2,66 @@ import requests
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import os
+import sys
 
 # API Config
 BASE_URL = "http://197.243.27.208:9097/api/dataservices/grn"
 AUTH_URL = "http://197.243.27.208:9097/api/auth/validate"
 
+def log(message):
+    """Helper to force logs to show up in GitHub immediately"""
+    print(message)
+    sys.stdout.flush()
+
 def get_token():
     user = os.getenv("API_USER")
     pw = os.getenv("API_PASS")
-    print(f"🔑 Logging in as {user}...")
+    log(f"🔑 Attempting login for: {user}...")
+    
     try:
-        # Added a strict timeout so it doesn't hang here
-        res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=15)
+        res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
         if res.status_code == 200:
-            print("✅ Token obtained.")
+            log("✅ Login Successful! Token obtained.")
             return res.json().get("token")
-        print(f"❌ Login Error {res.status_code}: {res.text}")
+        log(f"❌ Login Failed ({res.status_code}): {res.text}")
     except Exception as e:
-        print(f"❌ Connection Failed: {e}")
+        log(f"❌ Connection Error: {e}")
     return None
 
 def fetch_item(doc_id, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        # STRICT 10s TIMEOUT: If the API is too slow, skip it rather than hanging
-        r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=10)
+        r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
         return r.json() if r.status_code == 200 else None
     except:
         return None
 
 def run_sync():
-    print("🚀 Starting High-Speed Data Sync...")
+    log("🚀 Starting Aggressive Data Sync...")
     token = get_token()
-    if not token: return
+    if not token:
+        log("⛔ Aborting: No valid token.")
+        return
 
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        print("📡 Fetching GRN list...")
-        res = requests.get(BASE_URL, headers=headers, timeout=20)
+        log("📡 Requesting GRN Header List...")
+        res = requests.get(BASE_URL, headers=headers, timeout=30)
         docs = res.json().get("items", [])
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        print(f"📦 Found {len(doc_ids)} documents.")
+        log(f"📦 Total Documents Found: {len(doc_ids)}")
     except Exception as e:
-        print(f"❌ Could not get list: {e}")
+        log(f"❌ List Fetch Failed: {e}")
         return
 
-    # INCREASED TO 30 WORKERS FOR SPEED
     all_rows = []
-    print(f"⚡ Processing {len(doc_ids)} items using 30 parallel workers...")
+    log(f"⚡ Firing 30 parallel workers to fetch details...")
+    
+    # Using 30 workers to finish quickly
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
+    log("🔄 Processing results into table format...")
     for data in results:
         if data:
             items = data if isinstance(data, list) else [data]
@@ -69,9 +78,9 @@ def run_sync():
     if all_rows:
         df = pd.DataFrame(all_rows)
         df.to_csv("expiry_data.csv", index=False)
-        print(f"✅ SUCCESS! Saved {len(df)} rows to expiry_data.csv")
+        log(f"🎉 SUCCESS! {len(df)} rows saved to expiry_data.csv")
     else:
-        print("⚠️ No data was collected.")
+        log("⚠️ Sync finished, but no data was found.")
 
 if __name__ == "__main__":
     run_sync()
