@@ -8,32 +8,49 @@ BASE_URL = "http://197.243.27.208:9097/api/dataservices/grn"
 AUTH_URL = "http://197.243.27.208:9097/api/auth/validate"
 
 def get_token():
-    # In GitHub Actions, we use environment variables for security
     user = os.getenv("API_USER")
     pw = os.getenv("API_PASS")
-    res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
-    return res.json().get("token")
+    print(f"🔑 Logging in as {user}...")
+    try:
+        # Added a strict timeout so it doesn't hang here
+        res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=15)
+        if res.status_code == 200:
+            print("✅ Token obtained.")
+            return res.json().get("token")
+        print(f"❌ Login Error {res.status_code}: {res.text}")
+    except Exception as e:
+        print(f"❌ Connection Failed: {e}")
+    return None
 
 def fetch_item(doc_id, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=20)
+        # STRICT 10s TIMEOUT: If the API is too slow, skip it rather than hanging
+        r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=10)
         return r.json() if r.status_code == 200 else None
-    except: return None
+    except:
+        return None
 
 def run_sync():
-    print("🚀 Starting Data Sync...")
+    print("🚀 Starting High-Speed Data Sync...")
     token = get_token()
+    if not token: return
+
     headers = {"Authorization": f"Bearer {token}"}
-    
-    # 1. Get All Headers
-    res = requests.get(BASE_URL, headers=headers, timeout=30)
-    docs = res.json().get("items", [])
-    doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-    
-    # 2. Parallel Fetch (Processing the "Suffering" in background)
+    try:
+        print("📡 Fetching GRN list...")
+        res = requests.get(BASE_URL, headers=headers, timeout=20)
+        docs = res.json().get("items", [])
+        doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
+        print(f"📦 Found {len(doc_ids)} documents.")
+    except Exception as e:
+        print(f"❌ Could not get list: {e}")
+        return
+
+    # INCREASED TO 30 WORKERS FOR SPEED
     all_rows = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    print(f"⚡ Processing {len(doc_ids)} items using 30 parallel workers...")
+    with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
     for data in results:
@@ -45,13 +62,16 @@ def run_sync():
                     "Description": i.get("materialName"),
                     "Units": float(i.get("quantity", 0)),
                     "Plant": i.get("plant"),
-                    "Expiry": i.get("expiryDate"), # Save as string for CSV
+                    "Expiry": i.get("expiryDate"),
                     "unitCost": float(i.get("unitCost", 0))
                 })
     
-    df = pd.DataFrame(all_rows)
-    df.to_csv("expiry_data.csv", index=False)
-    print(f"✅ Sync Complete. Saved {len(df)} rows to expiry_data.csv")
+    if all_rows:
+        df = pd.DataFrame(all_rows)
+        df.to_csv("expiry_data.csv", index=False)
+        print(f"✅ SUCCESS! Saved {len(df)} rows to expiry_data.csv")
+    else:
+        print("⚠️ No data was collected.")
 
 if __name__ == "__main__":
     run_sync()
