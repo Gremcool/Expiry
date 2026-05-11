@@ -6,28 +6,29 @@ from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATION ---
 BASE_URL = "http://197.243.27.208:9097/api/dataservices/grn"
-AUTH_URL = "http://197.243.27.208:9097/api/login" # Verify this URL with your dev team
+AUTH_URL = "http://197.243.27.208:9097/api/auth/validate" 
 
-st.set_page_config(page_title="RMS API Dashboard", layout="wide")
+st.set_page_config(page_title="RMS Stock Expiry Dashboard", layout="wide")
 
-# Matching your original HTML design styles
+# --- 2. CSS STYLING (Matching your HTML Design) ---
 st.markdown("""
     <style>
     .main-header { background:#0D47A1; color:white; padding:20px; text-align:center; font-size:24px; font-weight:bold; border-radius:5px; margin-bottom:10px;}
     .card { background:white; padding:15px; text-align:center; box-shadow:0 2px 4px rgba(0,0,0,0.1); border-top: 5px solid #0D47A1; border-radius:5px; height: 100%; }
     .number { font-size:28px; font-weight:bold; color:#0D47A1; }
-    .stTable { font-size: 12px; }
+    .green-card { border-top-color: #2E7D32 !important; }
+    .red-card { border-top-color: #C62828 !important; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. AUTHENTICATION LOGIC ---
+# --- 3. AUTHENTICATION ---
 def get_valid_token():
-    """Exchange credentials for a fresh Bearer token."""
+    """Exchange credentials for a Bearer token automatically."""
     if "api_token" in st.session_state:
         return st.session_state.api_token
 
     try:
-        # Fetch credentials securely
+        # Pulls from Streamlit Cloud Secrets interface
         payload = {
             "username": st.secrets["username"],
             "password": st.secrets["password"]
@@ -36,16 +37,16 @@ def get_valid_token():
         response.raise_for_status()
         
         token = response.json().get("token")
-        # Store in session so we don't login on every tiny UI change
-        st.session_state.api_token = token 
-        return token
+        if token:
+            st.session_state.api_token = token 
+            return token
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        st.error(f"❌ Login Failed: {e}")
         return None
 
-# --- 3. DATA FETCHING (Combined Header & Item Level) ---
-@st.cache_data(ttl=86400) # Only calls API once every 24 hours
-def fetch_dashboard_data():
+# --- 4. DATA FETCHING ---
+@st.cache_data(ttl=86400) # Call API once every 24 hours
+def fetch_api_data():
     token = get_valid_token()
     if not token:
         return pd.DataFrame()
@@ -53,52 +54,53 @@ def fetch_dashboard_data():
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
     try:
-        # Step A: Get all GRN Document IDs
+        # Get list of Material Documents
         res = requests.get(BASE_URL, headers=headers, timeout=15)
         res.raise_for_status()
         docs = res.json().get("items", [])
         
         all_items = []
-        progress_bar = st.progress(0, "Fetching detailed stock data...")
+        progress_bar = st.progress(0, "Connecting to RMS Data Services...")
         
-        # Step B: Loop to get Item Level details (Expiries)
+        # Loop to get Item Level details (specifically for Expiry Dates)
+        total_docs = len(docs)
         for i, doc in enumerate(docs):
             doc_id = doc.get("materialDocument")
             if doc_id:
                 item_res = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=10)
                 if item_res.status_code == 200:
                     data = item_res.json()
-                    # Flatten the response if it's a list of materials inside one document
+                    # Standardizing response to a list
                     items_list = data if isinstance(data, list) else [data]
                     for item in items_list:
                         all_items.append({
                             "Material": item.get("material"),
-                            "Description": item.get("materialName"),
+                            "Description": item.get("materialName", "N/A"),
                             "Units": float(item.get("quantity", 0)),
-                            "Plant": item.get("plant"),
+                            "Plant": item.get("plant", "Unknown"),
                             "Expiry": pd.to_datetime(item.get("expiryDate"), errors='coerce'),
+                            "Cost": float(item.get("unitCost", 0)),
                             "TotalValue": float(item.get("quantity", 0)) * float(item.get("unitCost", 0))
                         })
-            progress_bar.progress((i + 1) / len(docs))
+            progress_bar.progress((i + 1) / total_docs)
         
         progress_bar.empty()
         return pd.DataFrame(all_items)
     except Exception as e:
-        # If token expired during fetch, clear it so next refresh logs in again
-        if "401" in str(e):
+        if "401" in str(e): # Handle expired session
             del st.session_state.api_token
-        st.error(f"Data Fetch Error: {e}")
+        st.error(f"⚠️ API Error: {e}")
         return pd.DataFrame()
 
-# --- 4. DASHBOARD UI ---
-if st.sidebar.button('🔄 Refresh from API'):
+# --- 5. UI & REFRESH ---
+if st.sidebar.button('🔄 Manual Refresh'):
     st.cache_data.clear()
     st.rerun()
 
-df = fetch_dashboard_data()
+df = fetch_api_data()
 
+# --- 6. DASHBOARD CALCULATIONS & DISPLAY ---
 if not df.empty:
-    # Logic for 3M/6M projections
     today = datetime.now()
     df = df.dropna(subset=['Expiry'])
     exp_3m = df[df['Expiry'] <= (today + timedelta(days=90))]
@@ -106,36 +108,47 @@ if not df.empty:
 
     st.markdown('<div class="main-header">RMS Stock Expiry Dashboard (Live API)</div>', unsafe_allow_html=True)
     
-    # KPI Cards
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.markdown(f'<div class="card"><h3>Total Units</h3><div class="number">{df["Units"].sum()/1e6:.2f}M</div></div>', unsafe_allow_html=True)
-    kpi2.markdown(f'<div class="card"><h3>Active SKUs</h3><div class="number">{df["Material"].nunique()}</div></div>', unsafe_allow_html=True)
-    kpi3.markdown(f'<div class="card" style="border-top-color:#C62828"><h3>3M Expiring Value</h3><div class="number">{exp_3m["TotalValue"].sum()/1e9:.2f}B</div></div>', unsafe_allow_html=True)
-    kpi4.markdown(f'<div class="card" style="border-top-color:#C62828"><h3>6M Expiring Value</h3><div class="number">{exp_6m["TotalValue"].sum()/1e9:.2f}B</div></div>', unsafe_allow_html=True)
+    # KPI Row
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(f'<div class="card"><h3>Total Units</h3><div class="number">{df["Units"].sum()/1e6:.2f}M</div></div>', unsafe_allow_html=True)
+    with k2:
+        st.markdown(f'<div class="card"><h3>Total SKUs</h3><div class="number">{df["Material"].nunique()}</div></div>', unsafe_allow_html=True)
+    with k3:
+        val3 = exp_3m["TotalValue"].sum()
+        st.markdown(f'<div class="card red-card"><h3>3M Expiry Risk</h3><div class="number">{val3/1e9:.2f}B</div></div>', unsafe_allow_html=True)
+    with k4:
+        val6 = exp_6m["TotalValue"].sum()
+        st.markdown(f'<div class="card red-card"><h3>6M Expiry Risk</h3><div class="number">{val6/1e9:.2f}B</div></div>', unsafe_allow_html=True)
 
-    # Charts
+    # Charts Row
     st.write("---")
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Top 10 Expiring (3M) by Value")
-        chart_data = exp_3m.groupby("Description")["TotalValue"].sum().nlargest(10).reset_index()
-        fig = px.bar(chart_data, x="TotalValue", y="Description", orientation='h', color_discrete_sequence=['#E53935'])
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Top 10 Expiring Materials (3 Months)")
+        top_10 = exp_3m.groupby("Description")["TotalValue"].sum().nlargest(10).reset_index()
+        fig1 = px.bar(top_10, x="TotalValue", y="Description", orientation='h', color_discrete_sequence=['#E53935'])
+        st.plotly_chart(fig1, use_container_width=True)
     
     with c2:
-        st.subheader("Expiry Risk by Plant")
-        plant_risk = exp_3m.groupby("Plant")["TotalValue"].sum().reset_index()
-        fig2 = px.pie(plant_risk, names="Plant", values="TotalValue", hole=0.5)
+        st.subheader("Inventory Value by Plant")
+        plant_val = df.groupby("Plant")["TotalValue"].sum().reset_index()
+        fig2 = px.pie(plant_val, names="Plant", values="TotalValue", hole=0.4)
         st.plotly_chart(fig2, use_container_width=True)
 
     # Risk Tables
-    st.markdown("### 🔍 Detailed Plant Risk Analysis")
-    for plant in sorted(df['Plant'].unique()):
-        with st.expander(f"Plant {plant} - Imminent Expiries"):
-            p_data = exp_3m[exp_3m['Plant'] == plant]
-            if not p_data.empty:
-                st.dataframe(p_data[['Material', 'Description', 'Expiry', 'Units', 'TotalValue']], use_container_width=True)
+    st.markdown("### 📋 Branch Inventory Analysis")
+    plants = sorted(df['Plant'].unique())
+    for plant in plants:
+        with st.expander(f"Plant: {plant} - Imminent Expiries (3 Months)"):
+            plant_data = exp_3m[exp_3m['Plant'] == plant]
+            if not plant_data.empty:
+                # Formatting numeric columns for better display
+                display_df = plant_data[['Material', 'Description', 'Expiry', 'Units', 'TotalValue']].copy()
+                display_df['Expiry'] = display_df['Expiry'].dt.strftime('%d-%b-%Y')
+                st.table(display_df)
             else:
-                st.info("No items expiring within 3 months for this plant.")
+                st.info("No items expiring in the next 3 months for this plant.")
+
 else:
-    st.info("No data available. Use the sidebar to refresh.")
+    st.warning("Could not load data. Please ensure your Secrets are set in Streamlit Cloud and the API is reachable.")
