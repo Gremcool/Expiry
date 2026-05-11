@@ -3,139 +3,119 @@ import requests
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor  # For parallel fetching
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 
 # --- 1. CONFIGURATION ---
 BASE_URL = "http://197.243.27.208:9097/api/dataservices/grn"
 AUTH_URL = "http://197.243.27.208:9097/api/auth/validate" 
 
-st.set_page_config(page_title="RMS Stock Expiry Dashboard", layout="wide")
+st.set_page_config(page_title="RMS Live Inventory", layout="wide")
 
-# Matching your original HTML design styles
+# Matching your Dashboard CSS
 st.markdown("""
     <style>
     .main-header { background:#0D47A1; color:white; padding:20px; text-align:center; font-size:24px; font-weight:bold; border-radius:5px; margin-bottom:10px;}
     .card { background:white; padding:15px; text-align:center; box-shadow:0 2px 4px rgba(0,0,0,0.1); border-top: 5px solid #0D47A1; border-radius:5px; height: 100%; }
     .number { font-size:28px; font-weight:bold; color:#0D47A1; }
-    .red-card { border-top-color: #C62828 !important; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. AUTHENTICATION ---
-def get_valid_token():
-    if "api_token" in st.session_state:
-        return st.session_state.api_token
+# --- 2. FAST AUTHENTICATION ---
+@st.cache_data(ttl=3600) # Only log in once per hour
+def get_auth_token():
     try:
         payload = {"username": st.secrets["username"], "password": st.secrets["password"]}
         response = requests.post(AUTH_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        token = response.json().get("token")
-        if token:
-            st.session_state.api_token = token 
-            return token
-    except Exception as e:
-        st.error(f"❌ Login Failed: {e}")
-        return None
-
-# --- 3. HELPER FOR PARALLEL FETCH ---
-def fetch_single_document(doc_id, headers):
-    """Function to fetch one document, used by the thread pool."""
-    try:
-        url = f"{BASE_URL}/{doc_id}"
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            return res.json()
+        return response.json().get("token")
     except:
         return None
-    return None
 
-# --- 4. DATA FETCHING (OPTIMIZED) ---
-@st.cache_data(ttl=86400)
-def fetch_api_data():
-    token = get_valid_token()
-    if not token:
-        return pd.DataFrame()
-
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    
+# --- 3. THE "LISTEN" TRICK (Takes < 1 second) ---
+def get_api_fingerprint(token):
+    """Fetches ONLY the header list to see if anything changed."""
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        # Step A: Get all GRN Document IDs
         res = requests.get(BASE_URL, headers=headers, timeout=15)
-        res.raise_for_status()
-        docs = res.json().get("items", [])
-        doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        
-        all_items = []
-        st.info(f"🚀 Speed-fetching {len(doc_ids)} documents in parallel...")
-        
-        # Step B: Parallel Fetching using ThreadPoolExecutor
-        # This opens 20 connections at once
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            # Map the fetch function to all IDs
-            results = list(executor.map(lambda id: fetch_single_document(id, headers), doc_ids))
-        
-        # Step C: Process results
-        for data in results:
-            if data:
-                items_list = data if isinstance(data, list) else [data]
-                for item in items_list:
-                    all_items.append({
-                        "Material": item.get("material"),
-                        "Description": item.get("materialName", "N/A"),
-                        "Units": float(item.get("quantity", 0)),
-                        "Plant": item.get("plant", "Unknown"),
-                        "Expiry": pd.to_datetime(item.get("expiryDate"), errors='coerce'),
-                        "TotalValue": float(item.get("quantity", 0)) * float(item.get("unitCost", 0))
-                    })
-        
-        return pd.DataFrame(all_items)
-    except Exception as e:
-        st.error(f"⚠️ API Error: {e}")
-        return pd.DataFrame()
+        items = res.json().get("items", [])
+        # Create a unique ID for this specific set of data
+        fingerprint = hashlib.md5(str(items).encode()).hexdigest()
+        return fingerprint, items
+    except:
+        return None, []
 
-# --- 5. UI LAYOUT ---
-if st.sidebar.button('🔄 Manual Refresh'):
+# --- 4. PARALLEL DATA PROCESSING ---
+def fetch_item_detail(doc_id, headers):
+    try:
+        res = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=10)
+        return res.json() if res.status_code == 200 else None
+    except:
+        return None
+
+@st.cache_data(persist="disk") # This saves the data to the server disk
+def get_cached_full_data(items_list, token):
+    """This is the 'slow' part that only runs when data is updated."""
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    doc_ids = [d.get("materialDocument") for d in items_list if d.get("materialDocument")]
+    
+    # Use 50 workers to blast through the requests in parallel
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        results = list(executor.map(lambda id: fetch_item_detail(id, headers), doc_ids))
+    
+    all_rows = []
+    for data in results:
+        if data:
+            items = data if isinstance(data, list) else [data]
+            for i in items:
+                all_rows.append({
+                    "Material": i.get("material"),
+                    "Description": i.get("materialName", "N/A"),
+                    "Units": float(i.get("quantity", 0)),
+                    "Plant": i.get("plant", "Unknown"),
+                    "Expiry": pd.to_datetime(i.get("expiryDate"), errors='coerce'),
+                    "TotalValue": float(i.get("quantity", 0)) * float(i.get("unitCost", 0))
+                })
+    return pd.DataFrame(all_rows)
+
+# --- 5. MAIN EXECUTION LOGIC ---
+token = get_auth_token()
+if token:
+    # Quick check: Has the data changed on the server?
+    current_fp, raw_items = get_api_fingerprint(token)
+    
+    # If this is a new session or data changed, refresh
+    if "last_fp" not in st.session_state or st.session_state.last_fp != current_fp:
+        st.session_state.last_fp = current_fp
+        # This only runs once when data changes
+        df = get_cached_full_data(raw_items, token)
+    else:
+        # This loads instantly (< 0.5s)
+        df = get_cached_full_data(raw_items, token)
+
+    # --- 6. DISPLAY DASHBOARD ---
+    if not df.empty:
+        st.markdown('<div class="main-header">RMS Live Inventory Dashboard</div>', unsafe_allow_html=True)
+        
+        # Logic for 3M/6M risk
+        today = datetime.now()
+        df = df.dropna(subset=['Expiry'])
+        exp_3m = df[df['Expiry'] <= (today + timedelta(days=90))]
+        
+        # KPI Row
+        col1, col2, col3 = st.columns(3)
+        col1.markdown(f'<div class="card"><h3>Total Units</h3><div class="number">{df["Units"].sum()/1e6:.2f}M</div></div>', unsafe_allow_html=True)
+        col2.markdown(f'<div class="card"><h3>Active SKUs</h3><div class="number">{df["Material"].nunique()}</div></div>', unsafe_allow_html=True)
+        col3.markdown(f'<div class="card" style="border-top-color:red"><h3>3M Expiry Risk</h3><div class="number">{exp_3m["TotalValue"].sum()/1e9:.2f}B</div></div>', unsafe_allow_html=True)
+        
+        st.write("---")
+        st.subheader("📋 Inventory by Material and Plant")
+        st.dataframe(df, use_container_width=True)
+        
+        st.success(f"⚡ Instant Load: Data is synced with API. Last check: {datetime.now().strftime('%H:%M:%S')}")
+else:
+    st.error("Could not authenticate with API.")
+
+# Sidebar Refresh
+if st.sidebar.button("🔄 Force API Re-Sync"):
     st.cache_data.clear()
     st.rerun()
-
-df = fetch_api_data()
-
-if not df.empty:
-    today = datetime.now()
-    df = df.dropna(subset=['Expiry'])
-    exp_3m = df[df['Expiry'] <= (today + timedelta(days=90))]
-    exp_6m = df[df['Expiry'] <= (today + timedelta(days=180))]
-
-    st.markdown('<div class="main-header">RMS Stock Expiry Dashboard (Live API)</div>', unsafe_allow_html=True)
-    
-    k1, k2, k3, k4 = st.columns(4)
-    k1.markdown(f'<div class="card"><h3>Total Units</h3><div class="number">{df["Units"].sum()/1e6:.2f}M</div></div>', unsafe_allow_html=True)
-    k2.markdown(f'<div class="card"><h3>Total SKUs</h3><div class="number">{df["Material"].nunique()}</div></div>', unsafe_allow_html=True)
-    k3.markdown(f'<div class="card red-card"><h3>3M Expiry Risk</h3><div class="number">{exp_3m["TotalValue"].sum()/1e9:.2f}B</div></div>', unsafe_allow_html=True)
-    k4.markdown(f'<div class="card red-card"><h3>6M Expiry Risk</h3><div class="number">{exp_6m["TotalValue"].sum()/1e9:.2f}B</div></div>', unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Top 10 Expiring Materials (3 Months)")
-        top_10 = exp_3m.groupby("Description")["TotalValue"].sum().nlargest(10).reset_index()
-        fig1 = px.bar(top_10, x="TotalValue", y="Description", orientation='h', color_discrete_sequence=['#E53935'])
-        st.plotly_chart(fig1, use_container_width=True)
-    
-    with c2:
-        st.subheader("Inventory Value by Plant")
-        plant_val = df.groupby("Plant")["TotalValue"].sum().reset_index()
-        fig2 = px.pie(plant_val, names="Plant", values="TotalValue", hole=0.4)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("### 📋 Branch Inventory Analysis")
-    for plant in sorted(df['Plant'].unique()):
-        with st.expander(f"Plant: {plant} - Imminent Expiries (3 Months)"):
-            plant_data = exp_3m[exp_3m['Plant'] == plant]
-            if not plant_data.empty:
-                display_df = plant_data[['Material', 'Description', 'Expiry', 'Units', 'TotalValue']].copy()
-                display_df['Expiry'] = display_df['Expiry'].dt.strftime('%d-%b-%Y')
-                st.table(display_df)
-            else:
-                st.info("No items expiring soon.")
-else:
-    st.info("Waiting for data...")
