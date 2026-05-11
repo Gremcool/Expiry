@@ -27,7 +27,6 @@ def get_token():
 def fetch_item(doc_id, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        # Document detail endpoint: BASE_URL/{materialDocument}
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
         if r.status_code == 200:
             return r.json()
@@ -43,7 +42,7 @@ def run_sync():
     headers = {"Authorization": f"Bearer {token}"}
     try:
         res = requests.get(BASE_URL, headers=headers, timeout=30)
-        # We take the latest 500 headers to keep the sync under 10 minutes
+        # Taking latest 500 to keep it fast
         docs = res.json().get("items", [])[:500] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
         log(f"📦 Syncing {len(doc_ids)} latest documents...")
@@ -55,31 +54,32 @@ def run_sync():
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
-    log("🔄 Extracting item data...")
+    log("🔄 Extracting item data from nested 'header' structure...")
     for entry in results:
-        if not entry: continue
+        if not entry or "header" not in entry:
+            continue
         
-        # Structure Fix: Individual documents usually return a list of items
-        items = entry if isinstance(entry, list) else [entry]
+        # Based on your screenshot, data is inside the 'header' key
+        h = entry.get("header")
         
-        for i in items:
-            # Map API keys to the dashboard criteria
-            all_rows.append({
-                "Material": i.get("material"),
-                "Description": i.get("materialName", "N/A"),
-                "Units": float(i.get("quantity", 0)),
-                "Plant": i.get("plant"),
-                "Expiry": i.get("expiryDate"),
-                "unitCost": float(i.get("unitCost", 0))
-            })
+        # Map exact keys from your screenshot to your dashboard criteria
+        all_rows.append({
+            "Material": h.get("Material"),
+            "Description": h.get("Material Description", "N/A"),
+            "Units": float(h.get("Quantity", 0)),
+            "Plant": h.get("Plant"),
+            "Expiry": h.get("Expiry Date"),
+            "unitCost": float(h.get("Unit Cost", 0)),
+            "DocNumber": h.get("Material Document")
+        })
     
     if all_rows:
         df = pd.DataFrame(all_rows)
-        # This overwrites the CSV stored in your Streamlit folder
+        # This overwrites the CSV in your GitHub repo for Streamlit to read
         df.to_csv("expiry_data.csv", index=False)
         log(f"✅ SUCCESS! Saved {len(df)} rows to expiry_data.csv")
     else:
-        log("⚠️ No data was extracted from document items.")
+        log("⚠️ No data was extracted. Check if 'header' key exists in API response.")
 
 if __name__ == "__main__":
     run_sync()
