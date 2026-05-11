@@ -2,23 +2,28 @@ name: Nightly API Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs at midnight UTC every day
-  workflow_dispatch: # Allows you to run it manually
+    - cron: '0 0 * * *'
+  workflow_dispatch: 
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # This block replaces the manual "Workflow permissions" settings
+    permissions:
+      contents: write
+      
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
           
       - name: Install dependencies
-        run: pip install pandas requests
+        run: |
+          pip install pandas requests
         
       - name: Run Sync Script
         env:
@@ -30,6 +35,6 @@ jobs:
         run: |
           git config --global user.name 'Sync Bot'
           git config --global user.email 'bot@github.com'
-          git add expiry_data.csv
-          git commit -m "Nightly data sync update"
+          git add expiry_data.csv || echo "No changes to add"
+          git commit -m "Nightly data sync update" || echo "Nothing to commit"
           git push
