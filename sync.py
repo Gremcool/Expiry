@@ -9,87 +9,77 @@ BASE_URL = "http://197.243.27.208:9097/api/dataservices/grn"
 AUTH_URL = "http://197.243.27.208:9097/api/auth/validate"
 
 def log(message):
-    """Force logs to show up in GitHub Actions immediately."""
     print(message, flush=True)
 
 def get_token():
     user = os.getenv("API_USER")
     pw = os.getenv("API_PASS")
-    log(f"🔑 Attempting login for user: {user}...")
+    log(f"🔑 Logging in as {user}...")
     try:
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
         if res.status_code == 200:
-            log("✅ Login Successful! Token obtained.")
             return res.json().get("token")
-        log(f"❌ Login Failed ({res.status_code}): {res.text}")
+        log(f"❌ Login failed: {res.status_code}")
     except Exception as e:
-        log(f"❌ Connection Error during login: {e}")
+        log(f"❌ Connection error: {e}")
     return None
 
 def fetch_item(doc_id, token):
-    """Fetch detail for a single document."""
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        # 10s timeout ensures one slow item doesn't hang the whole sync
-        r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=10)
-        return r.json() if r.status_code == 200 else None
+        # Document detail endpoint: BASE_URL/{materialDocument}
+        r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
+        if r.status_code == 200:
+            return r.json()
     except:
         return None
+    return None
 
 def run_sync():
-    log("🚀 Starting Aggressive Data Sync...")
+    log("🚀 Starting Data Sync...")
     token = get_token()
-    if not token:
-        log("⛔ Aborting: Could not obtain auth token.")
-        return
+    if not token: return
 
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        log("📡 Requesting GRN Header List...")
         res = requests.get(BASE_URL, headers=headers, timeout=30)
-        all_docs = res.json().get("items", [])
-        total_count = len(all_docs)
-        log(f"📦 Total documents on server: {total_count}")
-
-        # --- SELECTION LOGIC ---
-        # We only take the first 500 to ensure the script finishes in ~5 minutes
-        sync_docs = all_docs[:500] 
-        log(f"⚡ Syncing the latest {len(sync_docs)} documents to stay within time limits...")
-        
-        doc_ids = [d.get("materialDocument") for d in sync_docs if d.get("materialDocument")]
+        # We take the latest 500 headers to keep the sync under 10 minutes
+        docs = res.json().get("items", [])[:500] 
+        doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
+        log(f"📦 Syncing {len(doc_ids)} latest documents...")
     except Exception as e:
-        log(f"❌ Failed to fetch list: {e}")
+        log(f"❌ List fetch failed: {e}")
         return
 
     all_rows = []
-    log(f"Firing 30 parallel workers to fetch details for {len(doc_ids)} items...")
-    
-    # Process documents in parallel
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
-    log("🔄 Processing results into table format...")
-    for data in results:
-        if data:
-            items = data if isinstance(data, list) else [data]
-            for i in items:
-                # Mapping specifically to the fields needed for your dashboard
-                all_rows.append({
-                    "Material": i.get("material"),
-                    "Description": i.get("materialName", "N/A"),
-                    "Units": float(i.get("quantity", 0)),
-                    "Plant": i.get("plant"),
-                    "Expiry": i.get("expiryDate"),
-                    "unitCost": float(i.get("unitCost", 0))
-                })
+    log("🔄 Extracting item data...")
+    for entry in results:
+        if not entry: continue
+        
+        # Structure Fix: Individual documents usually return a list of items
+        items = entry if isinstance(entry, list) else [entry]
+        
+        for i in items:
+            # Map API keys to the dashboard criteria
+            all_rows.append({
+                "Material": i.get("material"),
+                "Description": i.get("materialName", "N/A"),
+                "Units": float(i.get("quantity", 0)),
+                "Plant": i.get("plant"),
+                "Expiry": i.get("expiryDate"),
+                "unitCost": float(i.get("unitCost", 0))
+            })
     
     if all_rows:
         df = pd.DataFrame(all_rows)
-        # Overwrite the CSV file in the repository
+        # This overwrites the CSV stored in your Streamlit folder
         df.to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! {len(df)} rows saved to expiry_data.csv")
+        log(f"✅ SUCCESS! Saved {len(df)} rows to expiry_data.csv")
     else:
-        log("⚠️ Sync finished, but no valid item data was found.")
+        log("⚠️ No data was extracted from document items.")
 
 if __name__ == "__main__":
     run_sync()
