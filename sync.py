@@ -17,104 +17,64 @@ def get_token():
     pw = os.getenv("API_PASS")
     try:
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
-        if res.status_code == 200:
-            return res.json().get("token")
-        log(f"❌ AUTH ERROR: {res.status_code}")
-    except Exception as e:
-        log(f"❌ AUTH CONNECTION ERROR: {e}")
-    return None
+        return res.json().get("token") if res.status_code == 200 else None
+    except: return None
 
-def fetch_master_data(token):
-    # --- STEP 1: DEFINE DEFAULTS AT THE TOP ---
-    # This guarantees 'mat_lookup' and 'branch_lookup' ALWAYS exist.
-    mat_lookup = {}
-    branch_lookup = {}
-    
+def fetch_material_names(token):
     headers = {"Authorization": f"Bearer {token}"}
-    
-    # --- STEP 2: ATTEMPT MATERIALS FETCH ---
+    lookup = {}
     try:
-        log("📡 Requesting Materials Master...")
+        log("📡 Fetching Material Names...")
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
-            items = res.json().get("items", [])
-            for m in items:
+            for m in res.json().get("items", []):
                 h = m.get("header", {})
                 mid = str(h.get("Material"))
-                if mid:
-                    mat_lookup[mid] = h.get("Material Description", "N/A")
-            log(f"✅ MATERIALS: {len(mat_lookup)} loaded.")
-        else:
-            log(f"⚠️ MATERIALS API FAILED: Status {res.status_code}")
-    except Exception as e:
-        log(f"⚠️ MATERIALS ERROR: {e}")
-
-    # --- STEP 3: ATTEMPT BRANCH CSV FETCH ---
-    try:
-        if os.path.exists("Branch.csv"):
-            branch_df = pd.read_csv("Branch.csv")
-            # We map 'Plant' to 'Branch' directly as they are common fields
-            if 'Plant' in branch_df.columns and 'Branch' in branch_df.columns:
-                # Convert Plant to string to match API format
-                branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['Branch']))
-                log(f"✅ BRANCH CSV: {len(branch_lookup)} mappings loaded.")
-            else:
-                log(f"❌ CSV COLUMNS WRONG: Found {list(branch_df.columns)}")
-        else:
-            log("❌ BRANCH CSV MISSING: File not found in repository.")
-    except Exception as e:
-        log(f"⚠️ BRANCH CSV READ ERROR: {e}")
-
-    return mat_lookup, branch_lookup
+                if mid: lookup[mid] = h.get("Material Description")
+    except: log("⚠️ Material lookup failed, using fallback names.")
+    return lookup
 
 def fetch_item_details(doc_id, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
         return r.json() if r.status_code == 200 else None
-    except:
-        return None
+    except: return None
 
 def run_sync():
-    log("🚀 Starting Data Sync...")
+    log("🚀 Starting Minimalist Sync...")
     token = get_token()
-    if not token:
+    if not token: 
+        log("❌ Auth Failed")
         return
     
-    # This call is now safe because variables are initialized inside the function
-    mat_lookup, branch_lookup = fetch_master_data(token)
+    mat_lookup = fetch_material_names(token)
 
-    headers = {"Authorization": f"Bearer {token}"}
     try:
-        res = requests.get(BASE_URL, headers=headers, timeout=30)
-        # Process the latest 800 documents
-        docs = res.json().get("items", [])[:800] 
+        res = requests.get(BASE_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        # We take a small batch (500) to ensure success
+        docs = res.json().get("items", [])[:500] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        log(f"📡 GRN LIST: Found {len(doc_ids)} docs.")
-    except Exception as e:
-        log(f"❌ GRN LIST ERROR: {e}")
-        return
+        log(f"📡 Processing {len(doc_ids)} documents...")
+    except: return
 
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item_details(x, token), doc_ids))
     
-    log("🔄 Extracting ZMED Data...")
     for entry in results:
         if not entry or "header" not in entry: continue
         h = entry.get("header")
         
-        # Mapping API to Dashboard
+        # Only medicine
         if h.get("Material Type") == "ZMED":
-            mat_id = str(h.get("Material"))
-            plant_id = str(h.get("Plant"))
-            
+            mid = str(h.get("Material"))
             all_rows.append({
-                "Material": mat_id,
-                "Description": mat_lookup.get(mat_id, h.get("Material Description", "N/A")),
+                "Material": mid,
+                "Description": mat_lookup.get(mid, h.get("Material Description", "N/A")),
                 "Units": float(h.get("Quantity", 0)),
-                "Plant": plant_id,
-                "Branch": branch_lookup.get(plant_id, f"Unmapped ({plant_id})"),
+                "Plant": h.get("Plant"),
+                "Branch": f"Plant {h.get('Plant')}", # Fallback since we are skipping CSV
                 "Expiry": h.get("SLED/BBD"),
                 "Batch": h.get("Batch", "N/A"),
                 "Program": h.get("WBS Element") or h.get("WBS Element.1", "General"),
@@ -123,9 +83,9 @@ def run_sync():
     
     if all_rows:
         pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! {len(all_rows)} ZMED items saved.")
+        log(f"🎉 SUCCESS! {len(all_rows)} items saved.")
     else:
-        log("⚠️ SYNC FINISHED: No ZMED items found.")
+        log("⚠️ No ZMED items found in this batch.")
 
 if __name__ == "__main__":
     run_sync()
