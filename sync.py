@@ -17,68 +17,88 @@ def get_token():
     pw = os.getenv("API_PASS")
     try:
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
-        return res.json().get("token") if res.status_code == 200 else None
-    except: return None
+        if res.status_code == 200:
+            return res.json().get("token")
+        log(f"❌ Login failed: {res.status_code}")
+    except Exception as e:
+        log(f"❌ Connection error: {e}")
+    return None
 
 def fetch_master_data(token):
+    """Fetches Material descriptions and Branch mappings."""
     headers = {"Authorization": f"Bearer {token}"}
     mat_lookup = {}
     
-    # 1. Materials Lookup (Handling nested 'header' from your screenshot)
+    # 1. Materials Lookup (Handling the nested 'header' structure)
     try:
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
             raw_materials = res.json().get("items", [])
             for m in raw_materials:
                 h = m.get("header", {})
-                # Use 'Material' as ID and 'Material Description' as Name
                 mat_id = str(h.get("Material"))
                 mat_name = h.get("Material Description")
                 if mat_id:
                     mat_lookup[mat_id] = mat_name
             log(f"✅ Loaded {len(mat_lookup)} material descriptions.")
-    except Exception as e: log(f"⚠️ Materials error: {e}")
+    except Exception as e:
+        log(f"⚠️ Materials error: {e}")
 
-    # 2. Branch Mapping (Fixing column names from your screenshot)
+    # 2. Branch Mapping (Using 'Plant' and 'Branch' columns from your CSV)
     branch_lookup = {}
     try:
         if os.path.exists("Branch.csv"):
             branch_df = pd.read_csv("Branch.csv")
-            # FIXED: Using 'Plant' and 'Branch' columns per your screenshot
+            # This line matches your CSV headers exactly to fix the KeyError
             branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['Branch']))
             log(f"✅ Loaded {len(branch_lookup)} branch names.")
-    except Exception as e: log(f"⚠️ Branch CSV error: {e}")
+        else:
+            log("⚠️ Branch.csv not found in repository folder.")
+    except Exception as e:
+        log(f"⚠️ Branch CSV mapping error: {e}")
 
     return mat_lookup, branch_lookup
 
 def fetch_item(doc_id, token):
+    """Fetches details for a single Material Document."""
     headers = {"Authorization": f"Bearer {token}"}
     try:
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
         return r.json() if r.status_code == 200 else None
-    except: return None
+    except:
+        return None
 
 def run_sync():
-    log("🚀 Starting Sync with corrected mappings...")
+    log("🚀 Starting Data Sync...")
     token = get_token()
     if not token: return
+    
+    # Load lookups first
     mat_lookup, branch_lookup = fetch_master_data(token)
 
+    # Get GRN List
     try:
         res = requests.get(BASE_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        docs = res.json().get("items", [])[:800] 
+        docs = res.json().get("items", [])[:800] # Adjusting limit for speed
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-    except: return
+        log(f"📡 Found {len(doc_ids)} documents. Fetching details...")
+    except Exception as e:
+        log(f"❌ Failed to fetch GRN list: {e}")
+        return
 
     all_rows = []
+    # Use 30 workers for high-speed parallel processing
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
+    log("🔄 Extracting item data and applying ZMED filters...")
     for entry in results:
-        if not entry or "header" not in entry: continue
+        if not entry or "header" not in entry:
+            continue
+        
         h = entry.get("header")
         
-        # Filter for ZMED only
+        # FILTER: Only include medicine types (ZMED)
         if h.get("Material Type") != "ZMED":
             continue
 
@@ -87,19 +107,24 @@ def run_sync():
         
         all_rows.append({
             "Material": mat_id,
+            # Priority: Material API Name > GRN Local Name > N/A
             "Description": mat_lookup.get(mat_id, h.get("Material Description", "N/A")),
             "Units": float(h.get("Quantity", 0)),
             "Plant": plant_id,
             "Branch": branch_lookup.get(plant_id, f"Plant {plant_id}"),
-            "Expiry": h.get("SLED/BBD"),
+            "Expiry": h.get("SLED/BBD"), # Using the BBD field per request
             "Batch": h.get("Batch", "N/A"),
             "Program": h.get("WBS Element") or h.get("WBS Element.1", "General"),
             "Total Value": float(h.get("Amt.in Loc.Cur.", 0))
         })
     
     if all_rows:
-        pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! Sync completed.")
+        df = pd.DataFrame(all_rows)
+        # Saves to the same file the Streamlit dashboard reads
+        df.to_csv("expiry_data.csv", index=False)
+        log(f"🎉 SUCCESS! {len(df)} items saved to expiry_data.csv")
+    else:
+        log("⚠️ No data saved. Check if ZMED items exist in the latest documents.")
 
 if __name__ == "__main__":
     run_sync()
