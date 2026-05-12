@@ -15,7 +15,6 @@ def log(message):
 def get_token():
     user = os.getenv("API_USER")
     pw = os.getenv("API_PASS")
-    log(f"🔑 Logging in...")
     try:
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
         return res.json().get("token") if res.status_code == 200 else None
@@ -28,6 +27,7 @@ def fetch_master_data(token):
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
             materials = res.json().get("items", [])
+            # Map materialID to materialName for the description lookup
             mat_lookup = {str(m.get("materialID")): m.get("materialName") for m in materials}
     except: log("⚠️ Materials lookup failed.")
 
@@ -35,11 +35,8 @@ def fetch_master_data(token):
     try:
         if os.path.exists("Branch.csv"):
             branch_df = pd.read_csv("Branch.csv")
-            # MATCHING YOUR CSV: 'Plant' and 'Branch Name'
             branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['Branch Name']))
-            log(f"✅ Loaded {len(branch_lookup)} branch mappings.")
-        else: log("⚠️ Branch.csv not found.")
-    except Exception as e: log(f"⚠️ Branch error: {e}")
+    except: log("⚠️ Branch.csv error.")
 
     return mat_lookup, branch_lookup
 
@@ -51,14 +48,14 @@ def fetch_item(doc_id, token):
     except: return None
 
 def run_sync():
-    log("🚀 Starting Data Sync...")
+    log("🚀 Starting Targeted Data Sync...")
     token = get_token()
     if not token: return
     mat_lookup, branch_lookup = fetch_master_data(token)
 
     try:
         res = requests.get(BASE_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        docs = res.json().get("items", [])[:500] 
+        docs = res.json().get("items", [])[:800] # Increased limit slightly
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
     except: return
 
@@ -69,20 +66,31 @@ def run_sync():
     for entry in results:
         if not entry or "header" not in entry: continue
         h = entry.get("header")
+        
+        # --- FILTERS & MAPPINGS ---
+        # 1. Only include ZMED materials
+        if h.get("Material Type") != "ZMED":
+            continue
+
+        mat_id = str(h.get("Material"))
         plant_id = str(h.get("Plant"))
+        
         all_rows.append({
-            "Material": str(h.get("Material")),
-            "Description": h.get("Material Description") or mat_lookup.get(str(h.get("Material")), "N/A"),
+            "Material": mat_id,
+            "Description": mat_lookup.get(mat_id, h.get("Material Description", "N/A")),
             "Units": float(h.get("Quantity", 0)),
             "Plant": plant_id,
-            "Branch": branch_lookup.get(plant_id, f"Plant {plant_id}"), # Added to CSV
-            "Expiry": h.get("Expiry Date"),
+            "Branch": branch_lookup.get(plant_id, f"Plant {plant_id}"),
+            "Expiry": h.get("SLED/BBD"), # Replaces Expiry
+            "Batch": h.get("Batch", "N/A"),
+            "Program": h.get("WBS Element") or h.get("WBS Element.1", "General"),
+            "Total Value": float(h.get("Amt.in Loc.Cur.", 0)), # Direct Value mapping
             "unitCost": float(h.get("Unit Cost", 0))
         })
     
     if all_rows:
         pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! Data saved with Branch Names.")
+        log(f"🎉 SUCCESS! Sync completed with {len(all_rows)} ZMED items.")
 
 if __name__ == "__main__":
     run_sync()
