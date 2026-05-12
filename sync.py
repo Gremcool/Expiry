@@ -16,58 +16,54 @@ def get_token():
     user = os.getenv("API_USER")
     pw = os.getenv("API_PASS")
     try:
-        log(f"🔑 Attempting login for user: {user}...")
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
         if res.status_code == 200:
-            log("✅ Login successful.")
             return res.json().get("token")
         log(f"❌ Login failed: {res.status_code}")
     except Exception as e:
-        log(f"❌ Connection error during login: {e}")
+        log(f"❌ Connection error: {e}")
     return None
 
 def fetch_master_data(token):
-    """Fetches Material descriptions and Branch mappings using the validated token."""
-    # This header is now used for the Materials API call
-    headers = {"Authorization": f"Bearer {token}"}
+    # --- CRITICAL FIX: Initialize variables first so they ALWAYS exist ---
     mat_lookup = {}
     branch_lookup = {}
     
-    # 1. Materials Lookup with Token Authorization
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # 1. Try to fetch Materials
     try:
-        log("📡 Fetching Material Master using token...")
+        log("📡 Fetching Material Master...")
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
-            raw_materials = res.json().get("items", [])
-            for m in raw_materials:
-                # Navigating the 'header' structure from your screenshot
+            items = res.json().get("items", [])
+            for m in items:
                 h = m.get("header", {})
-                mat_id = str(h.get("Material"))
-                mat_name = h.get("Material Description")
-                if mat_id:
-                    mat_lookup[mat_id] = mat_name
-            log(f"✅ Loaded {len(mat_lookup)} material descriptions.")
+                mid = str(h.get("Material"))
+                name = h.get("Material Description")
+                if mid:
+                    mat_lookup[mid] = name
+            log(f"✅ Loaded {len(mat_lookup)} descriptions.")
         else:
-            log(f"⚠️ Material API rejected token (Status: {res.status_code})")
+            log(f"⚠️ Material API error {res.status_code}")
     except Exception as e:
-        log(f"⚠️ Materials API error: {e}")
+        log(f"⚠️ Could not reach Materials API: {e}")
 
-    # 2. Branch Mapping (Local CSV - no token needed)
+    # 2. Try to fetch Branch CSV
     try:
         if os.path.exists("Branch.csv"):
             branch_df = pd.read_csv("Branch.csv")
-            # Using exact column names: 'Plant' and 'Branch'
+            # Using exact names: 'Plant' and 'Branch' from your CSV
             branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['Branch']))
-            log(f"✅ Loaded {len(branch_lookup)} branch names from CSV.")
+            log(f"✅ Loaded {len(branch_lookup)} branch mappings.")
         else:
-            log("⚠️ Branch.csv not found in repository.")
+            log("⚠️ Branch.csv file not found in repository.")
     except Exception as e:
         log(f"⚠️ Branch CSV error: {e}")
 
     return mat_lookup, branch_lookup
 
 def fetch_item(doc_id, token):
-    """Fetches details for a single document using token authorization."""
     headers = {"Authorization": f"Bearer {token}"}
     try:
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
@@ -76,22 +72,19 @@ def fetch_item(doc_id, token):
         return None
 
 def run_sync():
-    log("🚀 Starting Authenticated Data Sync...")
+    log("🚀 Starting Data Sync...")
     token = get_token()
     if not token:
-        log("⛔ Aborting: No valid token.")
         return
     
-    # Pass the token into the master data fetcher
+    # Now this will never cause a NameError because they are initialized inside the function
     mat_lookup, branch_lookup = fetch_master_data(token)
 
-    # Get GRN List
-    headers = {"Authorization": f"Bearer {token}"}
     try:
-        res = requests.get(BASE_URL, headers=headers, timeout=30)
+        res = requests.get(BASE_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
         docs = res.json().get("items", [])[:800] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        log(f"📡 Found {len(doc_ids)} documents. Syncing details...")
+        log(f"📡 Found {len(doc_ids)} documents.")
     except Exception as e:
         log(f"❌ Failed to fetch GRN list: {e}")
         return
@@ -100,14 +93,14 @@ def run_sync():
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
-    log("🔄 Finalizing data and applying ZMED filter...")
+    log("🔄 Extracting data and applying filters...")
     for entry in results:
         if not entry or "header" not in entry:
             continue
         
         h = entry.get("header")
         
-        # Filter: Medicine Only
+        # Filter for ZMED only
         if h.get("Material Type") != "ZMED":
             continue
 
@@ -128,9 +121,9 @@ def run_sync():
     
     if all_rows:
         pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! {len(all_rows)} ZMED items synced.")
+        log(f"🎉 SUCCESS! {len(all_rows)} ZMED items saved.")
     else:
-        log("⚠️ Sync complete, but no ZMED items were found in this batch.")
+        log("⚠️ Sync finished, but no ZMED items were found.")
 
 if __name__ == "__main__":
     run_sync()
