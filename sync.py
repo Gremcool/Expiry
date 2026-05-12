@@ -25,7 +25,7 @@ def get_token():
     return None
 
 def fetch_material_lookup(token):
-    """Fetches medicine names from the Materials endpoint using the token."""
+    """Only fetches medicine names from the Materials API."""
     headers = {"Authorization": f"Bearer {token}"}
     lookup = {}
     try:
@@ -39,10 +39,8 @@ def fetch_material_lookup(token):
                 if mid:
                     lookup[mid] = h.get("Material Description", "N/A")
             log(f"✅ MATERIALS: {len(lookup)} descriptions loaded.")
-        else:
-            log(f"⚠️ MATERIALS API FAILED: Status {res.status_code}")
-    except Exception as e:
-        log(f"⚠️ MATERIALS ERROR: {e}")
+    except:
+        log("⚠️ Materials lookup failed.")
     return lookup
 
 def fetch_item_details(doc_id, token):
@@ -54,35 +52,31 @@ def fetch_item_details(doc_id, token):
         return None
 
 def run_sync():
-    log("🚀 Starting Clean Data Sync...")
+    log("🚀 Starting Data Sync (CSV Ignored)...")
     token = get_token()
     if not token: return
     
-    # Get descriptions first
+    # Notice: We only expect ONE variable now (mat_lookup)
     mat_lookup = fetch_material_lookup(token)
 
-    # Get GRN document list
     headers = {"Authorization": f"Bearer {token}"}
     try:
         res = requests.get(BASE_URL, headers=headers, timeout=30)
-        # Pulling latest 800 for depth
         docs = res.json().get("items", [])[:800] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        log(f"📡 Found {len(doc_ids)} docs. Syncing details...")
-    except Exception as e:
-        log(f"❌ GRN LIST ERROR: {e}")
+        log(f"📡 Found {len(doc_ids)} docs. Syncing...")
+    except:
         return
 
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item_details(x, token), doc_ids))
     
-    log("🔄 Extracting ZMED items and mapping data...")
     for entry in results:
         if not entry or "header" not in entry: continue
         h = entry.get("header")
         
-        # Medicine filter per requirement
+        # Filter for medicines only
         if h.get("Material Type") == "ZMED":
             mid = str(h.get("Material"))
             all_rows.append({
@@ -90,7 +84,6 @@ def run_sync():
                 "Description": mat_lookup.get(mid, h.get("Material Description", "N/A")),
                 "Units": float(h.get("Quantity", 0)),
                 "Plant": h.get("Plant"),
-                "Location": f"Plant {h.get('Plant')}", # Using Plant ID as Location
                 "Expiry": h.get("SLED/BBD"),
                 "Batch": h.get("Batch", "N/A"),
                 "Program": h.get("WBS Element") or h.get("WBS Element.1", "General"),
@@ -99,9 +92,9 @@ def run_sync():
     
     if all_rows:
         pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! {len(all_rows)} ZMED items saved to expiry_data.csv")
+        log(f"🎉 SUCCESS! {len(all_rows)} ZMED items saved.")
     else:
-        log("⚠️ SYNC COMPLETE: Zero ZMED items found in latest batch.")
+        log("⚠️ Sync complete, but no ZMED items found.")
 
 if __name__ == "__main__":
     run_sync()
