@@ -19,51 +19,51 @@ def get_token():
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
         if res.status_code == 200:
             return res.json().get("token")
-        log(f"❌ Login failed: {res.status_code}")
+        log(f"❌ AUTH ERROR: Status {res.status_code} - Check your credentials in GitHub Secrets.")
     except Exception as e:
-        log(f"❌ Connection error: {e}")
+        log(f"❌ AUTH CONNECTION ERROR: {e}")
     return None
 
 def fetch_master_data(token):
-    # --- CRITICAL FIX: Initialize variables first so they ALWAYS exist ---
     mat_lookup = {}
     branch_lookup = {}
     
+    # 1. MATERIALS API: Just for Product Descriptions
     headers = {"Authorization": f"Bearer {token}"}
-    
-    # 1. Try to fetch Materials
     try:
-        log("📡 Fetching Material Master...")
+        log("📡 Requesting Materials Master for descriptions...")
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
             items = res.json().get("items", [])
             for m in items:
                 h = m.get("header", {})
                 mid = str(h.get("Material"))
-                name = h.get("Material Description")
                 if mid:
-                    mat_lookup[mid] = name
-            log(f"✅ Loaded {len(mat_lookup)} descriptions.")
+                    mat_lookup[mid] = h.get("Material Description", "N/A")
+            log(f"✅ MATERIALS SUCCESS: Loaded {len(mat_lookup)} descriptions.")
         else:
-            log(f"⚠️ Material API error {res.status_code}")
+            log(f"❌ MATERIALS API ERROR: Status {res.status_code}. Using GRN fallback names.")
     except Exception as e:
-        log(f"⚠️ Could not reach Materials API: {e}")
+        log(f"❌ MATERIALS CONNECTION ERROR: {e}")
 
-    # 2. Try to fetch Branch CSV
+    # 2. BRANCH CSV: Just for Plant-to-Name Mapping
     try:
         if os.path.exists("Branch.csv"):
             branch_df = pd.read_csv("Branch.csv")
-            # Using exact names: 'Plant' and 'Branch' from your CSV
-            branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['Branch']))
-            log(f"✅ Loaded {len(branch_lookup)} branch mappings.")
+            # Map 'Plant' ID column to 'Branch' Name column
+            if 'Plant' in branch_df.columns and 'Branch' in branch_df.columns:
+                branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['Branch']))
+                log(f"✅ BRANCH CSV SUCCESS: Loaded {len(branch_lookup)} plant mappings.")
+            else:
+                log(f"❌ BRANCH CSV FORMAT ERROR: Missing 'Plant' or 'Branch' columns. Found: {list(branch_df.columns)}")
         else:
-            log("⚠️ Branch.csv file not found in repository.")
+            log("❌ BRANCH CSV MISSING: 'Branch.csv' not found in repo root.")
     except Exception as e:
-        log(f"⚠️ Branch CSV error: {e}")
+        log(f"❌ BRANCH CSV READ ERROR: {e}")
 
     return mat_lookup, branch_lookup
 
-def fetch_item(doc_id, token):
+def fetch_item_details(doc_id, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
@@ -74,35 +74,32 @@ def fetch_item(doc_id, token):
 def run_sync():
     log("🚀 Starting Data Sync...")
     token = get_token()
-    if not token:
-        return
+    if not token: return
     
-    # Now this will never cause a NameError because they are initialized inside the function
     mat_lookup, branch_lookup = fetch_master_data(token)
 
+    # 3. GRN API: Get the documents
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        res = requests.get(BASE_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        res = requests.get(BASE_URL, headers=headers, timeout=30)
         docs = res.json().get("items", [])[:800] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        log(f"📡 Found {len(doc_ids)} documents.")
+        log(f"📡 GRN LIST SUCCESS: Found {len(doc_ids)} documents to process.")
     except Exception as e:
-        log(f"❌ Failed to fetch GRN list: {e}")
+        log(f"❌ GRN LIST ERROR: {e}")
         return
 
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
-        results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
+        results = list(executor.map(lambda x: fetch_item_details(x, token), doc_ids))
     
-    log("🔄 Extracting data and applying filters...")
+    log("🔄 Finalizing Data Extraction...")
     for entry in results:
-        if not entry or "header" not in entry:
-            continue
-        
+        if not entry or "header" not in entry: continue
         h = entry.get("header")
         
-        # Filter for ZMED only
-        if h.get("Material Type") != "ZMED":
-            continue
+        # Filter for medicines
+        if h.get("Material Type") != "ZMED": continue
 
         mat_id = str(h.get("Material"))
         plant_id = str(h.get("Plant"))
@@ -112,7 +109,8 @@ def run_sync():
             "Description": mat_lookup.get(mat_id, h.get("Material Description", "N/A")),
             "Units": float(h.get("Quantity", 0)),
             "Plant": plant_id,
-            "Branch": branch_lookup.get(plant_id, f"Plant {plant_id}"),
+            # MAP PLANT ID TO BRANCH NAME
+            "Branch": branch_lookup.get(plant_id, f"Unmapped Plant {plant_id}"),
             "Expiry": h.get("SLED/BBD"),
             "Batch": h.get("Batch", "N/A"),
             "Program": h.get("WBS Element") or h.get("WBS Element.1", "General"),
@@ -123,7 +121,7 @@ def run_sync():
         pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
         log(f"🎉 SUCCESS! {len(all_rows)} ZMED items saved.")
     else:
-        log("⚠️ Sync finished, but no ZMED items were found.")
+        log("⚠️ SYNC COMPLETE: But zero ZMED items were found in this batch.")
 
 if __name__ == "__main__":
     run_sync()
