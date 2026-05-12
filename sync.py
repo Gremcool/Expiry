@@ -17,21 +17,32 @@ def get_token():
     pw = os.getenv("API_PASS")
     try:
         res = requests.post(AUTH_URL, json={"username": user, "password": pw}, timeout=20)
-        return res.json().get("token") if res.status_code == 200 else None
-    except: return None
+        if res.status_code == 200:
+            return res.json().get("token")
+        log(f"❌ AUTH ERROR: Status {res.status_code}")
+    except Exception as e:
+        log(f"❌ AUTH CONNECTION ERROR: {e}")
+    return None
 
-def fetch_material_names(token):
+def fetch_material_lookup(token):
+    """Fetches medicine names from the Materials endpoint using the token."""
     headers = {"Authorization": f"Bearer {token}"}
     lookup = {}
     try:
-        log("📡 Fetching Material Names...")
+        log("📡 Fetching Material descriptions...")
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
-            for m in res.json().get("items", []):
+            items = res.json().get("items", [])
+            for m in items:
                 h = m.get("header", {})
                 mid = str(h.get("Material"))
-                if mid: lookup[mid] = h.get("Material Description")
-    except: log("⚠️ Material lookup failed, using fallback names.")
+                if mid:
+                    lookup[mid] = h.get("Material Description", "N/A")
+            log(f"✅ MATERIALS: {len(lookup)} descriptions loaded.")
+        else:
+            log(f"⚠️ MATERIALS API FAILED: Status {res.status_code}")
+    except Exception as e:
+        log(f"⚠️ MATERIALS ERROR: {e}")
     return lookup
 
 def fetch_item_details(doc_id, token):
@@ -39,34 +50,39 @@ def fetch_item_details(doc_id, token):
     try:
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
         return r.json() if r.status_code == 200 else None
-    except: return None
+    except:
+        return None
 
 def run_sync():
-    log("🚀 Starting Minimalist Sync...")
+    log("🚀 Starting Clean Data Sync...")
     token = get_token()
-    if not token: 
-        log("❌ Auth Failed")
-        return
+    if not token: return
     
-    mat_lookup = fetch_material_names(token)
+    # Get descriptions first
+    mat_lookup = fetch_material_lookup(token)
 
+    # Get GRN document list
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        res = requests.get(BASE_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        # We take a small batch (500) to ensure success
-        docs = res.json().get("items", [])[:500] 
+        res = requests.get(BASE_URL, headers=headers, timeout=30)
+        # Pulling latest 800 for depth
+        docs = res.json().get("items", [])[:800] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        log(f"📡 Processing {len(doc_ids)} documents...")
-    except: return
+        log(f"📡 Found {len(doc_ids)} docs. Syncing details...")
+    except Exception as e:
+        log(f"❌ GRN LIST ERROR: {e}")
+        return
 
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item_details(x, token), doc_ids))
     
+    log("🔄 Extracting ZMED items and mapping data...")
     for entry in results:
         if not entry or "header" not in entry: continue
         h = entry.get("header")
         
-        # Only medicine
+        # Medicine filter per requirement
         if h.get("Material Type") == "ZMED":
             mid = str(h.get("Material"))
             all_rows.append({
@@ -74,7 +90,7 @@ def run_sync():
                 "Description": mat_lookup.get(mid, h.get("Material Description", "N/A")),
                 "Units": float(h.get("Quantity", 0)),
                 "Plant": h.get("Plant"),
-                "Branch": f"Plant {h.get('Plant')}", # Fallback since we are skipping CSV
+                "Location": f"Plant {h.get('Plant')}", # Using Plant ID as Location
                 "Expiry": h.get("SLED/BBD"),
                 "Batch": h.get("Batch", "N/A"),
                 "Program": h.get("WBS Element") or h.get("WBS Element.1", "General"),
@@ -83,9 +99,9 @@ def run_sync():
     
     if all_rows:
         pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! {len(all_rows)} items saved.")
+        log(f"🎉 SUCCESS! {len(all_rows)} ZMED items saved to expiry_data.csv")
     else:
-        log("⚠️ No ZMED items found in this batch.")
+        log("⚠️ SYNC COMPLETE: Zero ZMED items found in latest batch.")
 
 if __name__ == "__main__":
     run_sync()
