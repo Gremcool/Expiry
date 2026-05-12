@@ -5,7 +5,7 @@ import os
 
 st.set_page_config(page_title="RMS Stock Dashboard", layout="wide")
 
-# CSS Styling to match your HTML
+# CSS Styling (Matches your HTML)
 st.markdown("""
     <style>
     .main-header { background:#0D47A1; color:white; padding:20px; text-align:center; font-size:24px; font-weight:bold; border-radius: 5px; }
@@ -19,41 +19,40 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">RMS Stock Expiry Dashboard</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-banner">Branch-Mapped Inventory Risk Outlook</div>', unsafe_allow_html=True)
 
 DATA_FILE = "expiry_data.csv"
 
 if os.path.exists(DATA_FILE):
     df = pd.read_csv(DATA_FILE)
+    
+    # SAFETY CHECK: Ensure Branch column exists to avoid KeyError
+    if 'Branch' not in df.columns:
+        st.info("🔄 Update in progress: The background sync is adding Branch Names to the data. Please wait 2 minutes and refresh.")
+        st.stop()
+
     df['Expiry'] = pd.to_datetime(df['Expiry'], errors='coerce')
     df['Total Value'] = df['Units'] * df['unitCost']
+    exp_3m = df[df['Expiry'] <= (datetime.now() + timedelta(days=90))]
     
-    today = datetime.now()
-    exp_3m = df[df['Expiry'] <= (today + timedelta(days=90))]
-    
-    # KPI Row
+    # KPI Cards
     c1, c2, c3 = st.columns(3)
     c1.markdown(f'<div class="card"><h3>Total Units</h3><div class="number">{df["Units"].sum()/1e6:.2f}M</div></div>', unsafe_allow_html=True)
     c2.markdown(f'<div class="card"><h3>Active SKUs</h3><div class="number">{df["Material"].nunique()}</div></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="card red"><h3>3M Risk Value</h3><div class="number">{exp_3m["Total Value"].sum()/1e9:.2f}B</div></div>', unsafe_allow_html=True)
 
     st.write("---")
-    st.subheader("📋 Branch Inventory (3-Month Risk Analysis)")
+    st.subheader("📋 Branch Inventory Risk Analysis")
     
-    # Grouping by Plant AND Branch Name
     branches = df[['Plant', 'Branch']].drop_duplicates().sort_values('Plant')
-    
     for _, row in branches.iterrows():
-        plant_id = row['Plant']
-        branch_name = row['Branch']
+        p_id, b_name = row['Plant'], row['Branch']
+        p_data = exp_3m[exp_3m['Plant'] == p_id].sort_values('Total Value', ascending=False)
         
-        branch_data = exp_3m[exp_3m['Plant'] == plant_id].sort_values('Total Value', ascending=False)
-        
-        if not branch_data.empty:
-            # Replicating your HTML Branch Headers
-            with st.expander(f"Plant: {int(plant_id)} | Branch: {branch_name} (3-Month Outlook)"):
-                display_df = branch_data[['Material', 'Description', 'Expiry', 'Units', 'Total Value']].copy()
-                display_df['Expiry'] = display_df['Expiry'].dt.strftime('%d-%b-%Y')
-                st.table(display_df.style.format({'Units': '{:,.0f}', 'Total Value': '{:,.0f}'}))
+        if not p_data.empty:
+            # LOOKS LIKE YOUR HTML: Plant ID | Branch Name
+            with st.expander(f"Plant: {int(p_id)} | Branch: {b_name} (3-Month Outlook)"):
+                display = p_data[['Material', 'Description', 'Expiry', 'Units', 'Total Value']].copy()
+                display['Expiry'] = display['Expiry'].dt.strftime('%d-%b-%Y')
+                st.table(display.style.format({'Units': '{:,.0f}', 'Total Value': '{:,.0f}'}))
 else:
-    st.error("Data file not found. Ensure the nightly sync has run.")
+    st.error("Data file not found. Please trigger the manual sync in GitHub Actions.")
