@@ -25,22 +25,34 @@ def get_token():
         log(f"❌ Connection error: {e}")
     return None
 
-def fetch_material_master(token):
-    """Fetch all materials to create a lookup table for descriptions."""
+def fetch_master_data(token):
+    """Fetch material descriptions and branch mappings."""
     headers = {"Authorization": f"Bearer {token}"}
-    log("📦 Fetching Material Master for descriptions...")
+    
+    # 1. Material Lookup
+    mat_lookup = {}
     try:
         res = requests.get(MATERIALS_URL, headers=headers, timeout=30)
         if res.status_code == 200:
-            # Create a dictionary {materialID: description}
-            # Adjust the keys 'materialID' and 'description' if your API uses different names
             materials = res.json().get("items", [])
-            lookup = {str(m.get("materialID")): m.get("materialName") or m.get("description") for m in materials}
-            log(f"✅ Loaded {len(lookup)} material descriptions.")
-            return lookup
+            mat_lookup = {str(m.get("materialID")): m.get("materialName") or m.get("description") for m in materials}
+            log(f"✅ Loaded {len(mat_lookup)} material descriptions.")
+    except: log("⚠️ Material descriptions fetch failed.")
+
+    # 2. Branch Mapping (from your uploaded branch.csv)
+    branch_lookup = {}
+    try:
+        if os.path.exists("branch.csv"):
+            branch_df = pd.read_csv("branch.csv")
+            # Assumes branch.csv has 'Plant' and 'BranchName' columns
+            branch_lookup = dict(zip(branch_df['Plant'].astype(str), branch_df['BranchName']))
+            log(f"✅ Loaded {len(branch_lookup)} branch mappings from CSV.")
+        else:
+            log("⚠️ branch.csv not found in repository.")
     except Exception as e:
-        log(f"⚠️ Could not load material descriptions: {e}")
-    return {}
+        log(f"⚠️ Error loading branch.csv: {e}")
+
+    return mat_lookup, branch_lookup
 
 def fetch_item(doc_id, token):
     headers = {"Authorization": f"Bearer {token}"}
@@ -48,63 +60,50 @@ def fetch_item(doc_id, token):
         r = requests.get(f"{BASE_URL}/{doc_id}", headers=headers, timeout=15)
         if r.status_code == 200:
             return r.json()
-    except:
-        return None
+    except: return None
     return None
 
 def run_sync():
-    log("🚀 Starting Data Sync with Material Mapping...")
+    log("🚀 Starting Data Sync with Branch Mapping...")
     token = get_token()
     if not token: return
 
-    # 1. Get Material Metadata first
-    material_lookup = fetch_material_master(token)
+    mat_lookup, branch_lookup = fetch_master_data(token)
 
-    # 2. Get GRN Headers
     headers = {"Authorization": f"Bearer {token}"}
     try:
         res = requests.get(BASE_URL, headers=headers, timeout=30)
         docs = res.json().get("items", [])[:500] 
         doc_ids = [d.get("materialDocument") for d in docs if d.get("materialDocument")]
-        log(f"📡 Syncing {len(doc_ids)} GRN documents...")
+        log(f"📡 Processing {len(doc_ids)} latest documents...")
     except Exception as e:
-        log(f"❌ GRN List fetch failed: {e}")
+        log(f"❌ List fetch failed: {e}")
         return
 
-    # 3. Fetch Items in Parallel
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(lambda x: fetch_item(x, token), doc_ids))
     
-    log("🔄 Mapping descriptions and extracting data...")
     for entry in results:
-        if not entry or "header" not in entry:
-            continue
-        
+        if not entry or "header" not in entry: continue
         h = entry.get("header")
-        mat_id = str(h.get("Material"))
         
-        # Get description from API, if empty try the Master Lookup we just built
-        desc = h.get("Material Description")
-        if not desc or desc == "N/A":
-            desc = material_lookup.get(mat_id, "Description Not Found")
-
+        mat_id = str(h.get("Material"))
+        plant_id = str(h.get("Plant"))
+        
         all_rows.append({
             "Material": mat_id,
-            "Description": desc,
+            "Description": h.get("Material Description") or mat_lookup.get(mat_id, "N/A"),
             "Units": float(h.get("Quantity", 0)),
-            "Plant": h.get("Plant"),
+            "Plant": plant_id,
+            "Branch": branch_lookup.get(plant_id, f"Plant {plant_id}"),
             "Expiry": h.get("Expiry Date"),
-            "unitCost": float(h.get("Unit Cost", 0)),
-            "DocNumber": h.get("Material Document")
+            "unitCost": float(h.get("Unit Cost", 0))
         })
     
     if all_rows:
-        df = pd.DataFrame(all_rows)
-        df.to_csv("expiry_data.csv", index=False)
-        log(f"🎉 SUCCESS! Saved {len(df)} rows with descriptions to expiry_data.csv")
-    else:
-        log("⚠️ No data was extracted.")
+        pd.DataFrame(all_rows).to_csv("expiry_data.csv", index=False)
+        log(f"🎉 SUCCESS! Saved to expiry_data.csv")
 
 if __name__ == "__main__":
     run_sync()
