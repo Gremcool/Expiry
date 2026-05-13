@@ -1,7 +1,6 @@
 import requests
 import json
 import os
-import pandas as pd
 
 # API Configuration
 GRN_URL = "http://197.243.27.208:9097/api/dataservices/grn"
@@ -21,43 +20,64 @@ def get_token():
         log(f"❌ Auth Error: {e}")
         return None
 
-def dump_data(url, filename, token, key_name="items"):
-    """Generic function to fetch API data and save as JSON."""
+def clean_id(val):
+    """
+    Converts IDs to integers to ignore any extra zero-padding.
+    Example: '1000000001' and '1001' will stay distinct, 
+    but '0001001' and '1001' will match.
+    """
+    if val is None: return ""
+    s_val = str(val).strip()
+    try:
+        # Converting to int removes all leading zeros regardless of count
+        return str(int(s_val))
+    except ValueError:
+        # Fallback for IDs with letters: just strip leading zeros
+        return s_val.lstrip('0')
+
+def dump_data(url, filename, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
         log(f"📡 Fetching {filename}...")
-        # Using size=15000 to capture full datasets
         res = requests.get(f"{url}?size=15000", headers=headers, timeout=60)
         if res.status_code == 200:
-            data = res.json()
+            raw_json = res.json()
             
+            is_materials = "materials" in url
+            records = raw_json.get("data" if is_materials else "items", [])
+
+            processed = []
+            for item in records:
+                row = item.get("header", item)
+                
+                # Apply integer-based join logic
+                if is_materials and "materialId" in row:
+                    row["join_id"] = clean_id(row["materialId"])
+                
+                if not is_materials and "Material" in row:
+                    row["join_id"] = clean_id(row["Material"])
+                    # Ensure Batch is included as requested
+                    if "Batch" not in row:
+                        row["Batch"] = "N/A"
+
+                processed.append(row)
+
             os.makedirs('data', exist_ok=True)
             with open(f'data/{filename}', 'w') as f:
-                json.dump(data, f, indent=4)
-            log(f"✅ Saved: data/{filename}")
+                json.dump(processed, f, indent=4)
+            log(f"✅ Saved {len(processed)} records to data/{filename}")
             return True
     except Exception as e:
-        log(f"⚠️ Error dumping {filename}: {e}")
+        log(f"⚠️ Error in {filename}: {e}")
     return False
 
 def run_sync():
-    log("🚀 Starting Triple-Dump Sync for Dashboard...")
+    log("🚀 Starting Triple-Dump Sync...")
     token = get_token()
-    if not token:
-        log("❌ Critical: Could not authenticate.")
-        return
+    if not token: return
 
-    # 1. Dump GRN Data (The 'items' from your earlier screenshots)
-    dump_data(GRN_URL, "raw_grn.json", token, key_name="items")
-
-    # 2. Dump Materials Master (The 'data' from your earlier screenshots)
-    dump_data(MATERIALS_URL, "raw_materials.json", token, key_name="data")
-
-    # 3. Check for Branch.csv
-    if os.path.exists("Branch.csv"):
-        log("✅ Branch.csv detected for dashboard joining.")
-    else:
-        log("⚠️ Warning: Branch.csv not found in root directory.")
+    dump_data(GRN_URL, "raw_grn.json", token)
+    dump_data(MATERIALS_URL, "raw_materials.json", token)
 
 if __name__ == "__main__":
     run_sync()
