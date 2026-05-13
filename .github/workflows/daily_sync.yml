@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # This ensures the bot has permission to push the JSON files back to the repo
     permissions:
       contents: write
       
@@ -21,7 +22,8 @@ jobs:
           python-version: '3.10'
           
       - name: Install dependencies
-        run: pip install pandas requests
+        run: |
+          pip install requests pandas
         
       - name: Run Sync Script
         env:
@@ -34,10 +36,10 @@ jobs:
           git config --global user.name 'Sync Bot'
           git config --global user.email 'bot@github.com'
           
-          # Add the new JSON data folder and any existing CSVs
+          # Add the new data folder and keep your existing CSVs tracked
           git add data/*.json Branch.csv expiry_data.csv || echo "No changes to add"
           
-          # Commit only if there are changes to avoid failing the workflow
-          git commit -m "Nightly Dashboard Dump: GRN, Materials, and Branch" || echo "Nothing to commit"
+          # We use '|| echo' so the action doesn't fail if there are no data updates
+          git commit -m "Nightly Dashboard Dump: GRN, Materials (with Clean IDs), and Branch" || echo "Nothing to commit"
           
           git push
