@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # CRITICAL for updating the data folder
+      contents: write
       
     steps:
       - name: Checkout repo
@@ -33,7 +33,6 @@ jobs:
         run: |
           git config --global user.name 'Sync Bot'
           git config --global user.email 'bot@github.com'
-          git add data/raw_grn.json data/raw_materials.json Branch.csv
-          # This commit message will show up on the data folder when it works
-          git commit -m "Sync: Raw Dumps with Material and Batch fields" || echo "No changes"
+          git add data/*.json Branch.csv
+          git commit -m "Sync: Added Material, Batch, and totalValue" || echo "No changes"
           git push
