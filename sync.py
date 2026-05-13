@@ -22,17 +22,14 @@ def get_token():
 
 def clean_id(val):
     """
-    Converts IDs to integers to ignore any extra zero-padding.
-    Example: '1000000001' and '1001' will stay distinct, 
-    but '0001001' and '1001' will match.
+    Converts IDs to integers to ignore any length discrepancies or extra zero-padding.
+    Example: '1000000001' and '1000001' remain unique, but '0000100' and '100' will match.
     """
     if val is None: return ""
     s_val = str(val).strip()
     try:
-        # Converting to int removes all leading zeros regardless of count
         return str(int(s_val))
     except ValueError:
-        # Fallback for IDs with letters: just strip leading zeros
         return s_val.lstrip('0')
 
 def dump_data(url, filename, token):
@@ -48,17 +45,19 @@ def dump_data(url, filename, token):
 
             processed = []
             for item in records:
+                # Extract the 'header' block as our flat record
                 row = item.get("header", item)
                 
-                # Apply integer-based join logic
-                if is_materials and "materialId" in row:
-                    row["join_id"] = clean_id(row["materialId"])
-                
-                if not is_materials and "Material" in row:
+                if is_materials:
+                    # Logic for Materials Master
+                    if "materialId" in row:
+                        row["join_id"] = clean_id(row["materialId"])
+                else:
+                    # Logic for GRN (transaction data)
+                    # Ensuring Batch and Material are present as requested
+                    row["Material"] = row.get("Material", "N/A")
+                    row["Batch"] = row.get("Batch", "N/A")
                     row["join_id"] = clean_id(row["Material"])
-                    # Ensure Batch is included as requested
-                    if "Batch" not in row:
-                        row["Batch"] = "N/A"
 
                 processed.append(row)
 
@@ -72,11 +71,14 @@ def dump_data(url, filename, token):
     return False
 
 def run_sync():
-    log("🚀 Starting Triple-Dump Sync...")
+    log("🚀 Starting Sync...")
     token = get_token()
     if not token: return
 
+    # Dump the transaction data (GRN)
     dump_data(GRN_URL, "raw_grn.json", token)
+    
+    # Dump the lookup data (Materials)
     dump_data(MATERIALS_URL, "raw_materials.json", token)
 
 if __name__ == "__main__":
