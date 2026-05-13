@@ -31,16 +31,17 @@ def dump_data(url, filename, token):
 
             flattened_results = []
             for item in records:
+                # Get the nested header data
                 header_content = item.get("header", {})
                 
-                # 1. Merge the nested fields (Material, Batch, Currency, etc.) to top level
+                # Merge top-level and header fields
                 flat_row = {**item, **header_content}
                 
-                # 2. Specific Mapping: Create 'totalValue' from 'Amt.in Loc.Cur.'
+                # Specifically map 'Amt.in Loc.Cur.' to 'totalValue'
                 if "Amt.in Loc.Cur." in flat_row:
                     flat_row["totalValue"] = flat_row["Amt.in Loc.Cur."]
                 
-                # 3. Clean up the response
+                # Remove the redundant header object
                 if "header" in flat_row:
                     del flat_row["header"]
                 
