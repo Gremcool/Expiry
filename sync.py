@@ -32,10 +32,18 @@ def dump_data(url, filename, token):
             flattened_results = []
             for item in records:
                 header_content = item.get("header", {})
-                # This merges the nested Material and Batch into the top level
+                
+                # 1. Merge the nested fields (Material, Batch, Currency, etc.) to top level
                 flat_row = {**item, **header_content}
+                
+                # 2. Specific Mapping: Create 'totalValue' from 'Amt.in Loc.Cur.'
+                if "Amt.in Loc.Cur." in flat_row:
+                    flat_row["totalValue"] = flat_row["Amt.in Loc.Cur."]
+                
+                # 3. Clean up the response
                 if "header" in flat_row:
                     del flat_row["header"]
+                
                 flattened_results.append(flat_row)
 
             os.makedirs('data', exist_ok=True)
@@ -49,7 +57,7 @@ def run_sync():
     log("🚀 Starting Raw Data Dumps...")
     token = get_token()
     if not token: 
-        log("❌ Authentication failed. Check API_USER and API_PASS secrets.")
+        log("❌ Authentication failed.")
         return
 
     dump_data(GRN_URL, "raw_grn.json", token)
