@@ -2,13 +2,13 @@ name: Nightly API Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs at midnight UTC
-  workflow_dispatch:      # Allows you to trigger it manually from the Actions tab
+    - cron: '0 0 * * *'  # Runs at 00:00 UTC
+  workflow_dispatch:      # Allows manual trigger via the "Actions" tab
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # CRITICAL: This allows the bot to push the generated JSON files back to your repo
+    # REQUIRED: Allows the script to push updated JSON files back to the repo
     permissions:
       contents: write
       
@@ -30,16 +30,15 @@ jobs:
           API_PASS: ${{ secrets.API_PASS }}
         run: python sync.py
         
-      - name: Commit and Push Raw Data
+      - name: Commit and Push
         run: |
           git config --global user.name 'Sync Bot'
           git config --global user.email 'bot@github.com'
           
-          # This adds the entire data folder (raw_grn.json and raw_materials.json)
-          # and ensures your manually managed Branch.csv is included.
-          git add data/*.json Branch.csv || echo "No data files found to add"
+          # Force track the JSON dumps and your Branch mapping
+          git add data/raw_grn.json data/raw_materials.json Branch.csv
           
-          # Using '|| echo' prevents the action from failing if the data hasn't changed
-          git commit -m "Sync: Raw GRN (with Material/Batch) and Materials Master" || echo "Nothing to commit"
+          # Commit will only happen if data has actually changed
+          git commit -m "Sync: Raw Dumps with Material and Batch fields" || echo "No changes detected"
           
           git push
