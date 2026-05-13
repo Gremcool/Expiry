@@ -21,50 +21,49 @@ def get_token():
 def dump_data(url, filename, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        log(f"📡 Fetching {filename}...")
-        # Get full dataset
+        log(f"📡 Fetching raw data for {filename}...")
         res = requests.get(f"{url}?size=15000", headers=headers, timeout=60)
         if res.status_code == 200:
             raw_json = res.json()
             
-            # Determine list location: GRN uses 'items', Materials uses 'data'
+            # Identify list key: GRN uses 'items', Materials uses 'data'
             is_materials = "materials" in url
             records = raw_json.get("data" if is_materials else "items", [])
 
-            processed = []
+            flattened_results = []
             for item in records:
-                # 1. Start with the top-level fields (materialDocument, entryDate, etc.)
-                # 2. Merge it with everything inside the 'header' block (Material, Batch, Plant)
-                header_data = item.get("header", {})
+                # 1. Get the sub-object 'header'
+                header_content = item.get("header", {})
                 
-                # Combine them into one flat object
-                flat_record = {**item, **header_data}
+                # 2. Merge everything into a single flat dictionary.
+                # This brings 'Material' and 'Batch' from the inside to the outside.
+                flat_row = {**item, **header_content}
                 
-                # Remove the nested 'header' key from the final output to keep it clean
-                if "header" in flat_record:
-                    del flat_record["header"]
+                # 3. Clean up: remove the now-redundant nested 'header' key
+                if "header" in flat_row:
+                    del flat_row["header"]
                 
-                processed.append(flat_record)
+                flattened_results.append(flat_row)
 
-            # Save as JSON
+            # Save the clean list to your JSON file
             os.makedirs('data', exist_ok=True)
             with open(f'data/{filename}', 'w') as f:
-                json.dump(processed, f, indent=4)
-            log(f"✅ Saved {len(processed)} records to data/{filename}")
+                json.dump(flattened_results, f, indent=4)
+            log(f"✅ Saved {len(flattened_results)} records to data/{filename}")
     except Exception as e:
         log(f"⚠️ Error: {e}")
 
 def run_sync():
-    log("🚀 Starting Raw Data Dumps...")
+    log("🚀 Starting Raw Independent Dumps...")
     token = get_token()
     if not token: 
-        log("❌ Auth failed.")
+        log("❌ Authentication failed.")
         return
 
-    # Dump 1: Raw GRN data (Now includes Material and Batch from the header)
+    # Task 1: GRN Dump (Now correctly includes Material and Batch in the list)
     dump_data(GRN_URL, "raw_grn.json", token)
     
-    # Dump 2: Raw Materials Master data
+    # Task 2: Materials Master Dump (Unchanged, saved separately)
     dump_data(MATERIALS_URL, "raw_materials.json", token)
 
 if __name__ == "__main__":
