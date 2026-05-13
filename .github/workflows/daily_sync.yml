@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # This block replaces the manual "Workflow permissions" settings
     permissions:
       contents: write
       
@@ -22,8 +21,7 @@ jobs:
           python-version: '3.10'
           
       - name: Install dependencies
-        run: |
-          pip install pandas requests
+        run: pip install pandas requests
         
       - name: Run Sync Script
         env:
@@ -31,10 +29,15 @@ jobs:
           API_PASS: ${{ secrets.API_PASS }}
         run: python sync.py
         
-      - name: Commit and Push CSV
+      - name: Commit and Push Dumps
         run: |
           git config --global user.name 'Sync Bot'
           git config --global user.email 'bot@github.com'
-          git add expiry_data.csv || echo "No changes to add"
-          git commit -m "Nightly data sync update" || echo "Nothing to commit"
+          
+          # Add the new JSON data folder and any existing CSVs
+          git add data/*.json Branch.csv expiry_data.csv || echo "No changes to add"
+          
+          # Commit only if there are changes to avoid failing the workflow
+          git commit -m "Nightly Dashboard Dump: GRN, Materials, and Branch" || echo "Nothing to commit"
+          
           git push
