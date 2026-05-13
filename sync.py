@@ -23,31 +23,21 @@ def dump_data(url, filename, token):
     headers = {"Authorization": f"Bearer {token}"}
     try:
         log(f"📡 Fetching data for {filename}...")
-        # Requesting a large size to ensure all records are captured
         res = requests.get(f"{url}?size=15000", headers=headers, timeout=60)
         if res.status_code == 200:
             raw_json = res.json()
-            
-            # GRN uses 'items' key, Materials uses 'data' key
             is_materials = "materials" in url
             records = raw_json.get("data" if is_materials else "items", [])
 
             flattened_results = []
             for item in records:
-                # Extract the 'header' sub-object
                 header_content = item.get("header", {})
-                
-                # Merge top-level and header fields into one flat object.
-                # This ensures "Material" and "Batch" are at the top level.
+                # This merges the nested Material and Batch into the top level
                 flat_row = {**item, **header_content}
-                
-                # Remove the nested header key to avoid clutter
                 if "header" in flat_row:
                     del flat_row["header"]
-                
                 flattened_results.append(flat_row)
 
-            # Ensure the data directory exists
             os.makedirs('data', exist_ok=True)
             with open(f'data/{filename}', 'w') as f:
                 json.dump(flattened_results, f, indent=4)
@@ -62,10 +52,7 @@ def run_sync():
         log("❌ Authentication failed. Check API_USER and API_PASS secrets.")
         return
 
-    # Dump 1: Raw GRN data (includes Material and Batch from the header)
     dump_data(GRN_URL, "raw_grn.json", token)
-    
-    # Dump 2: Raw Materials Master data (saved independently)
     dump_data(MATERIALS_URL, "raw_materials.json", token)
 
 if __name__ == "__main__":
